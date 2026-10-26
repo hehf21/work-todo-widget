@@ -18,6 +18,11 @@ CFG    = os.path.join(BASE, '挂件配置.json')
 PY     = os.path.join(BASE, 'venv', 'Scripts', 'python.exe')
 if not os.path.exists(PY):
     PY = sys.executable
+PYW    = os.path.join(os.path.dirname(PY), 'pythonw.exe')
+if not os.path.exists(PYW):
+    PYW = PY
+NO_WIN = 0x08000000 if os.name == 'nt' else 0     # CREATE_NO_WINDOW：子进程不弹黑框
+HIDDEN = os.path.join(BASE, '已删除.json')
 MANUAL_GROUP = '手动添加'
 ORDER = {'overdue': 0, 'today': 1, 'new': 2, 'open': 3, 'done': 4}
 
@@ -453,6 +458,9 @@ class Widget:
         m.add_command(label='刷新数据（重新抓微信群）', command=self.do_refresh)
         m.add_command(label='打开台账文件夹', command=lambda: os.startfile(BASE))
         m.add_command(label='重置全部完成标记（保留备注）', command=self.reset_done)
+        n_hid = len(self.load_hidden())
+        if n_hid:
+            m.add_command(label=f'恢复已删除的交办（{n_hid} 条）', command=self.restore_hidden)
         m.add_separator()
         m.add_command(label='退出', command=self.quit)
         try: m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
@@ -591,7 +599,74 @@ class Widget:
         except Exception:
             self.items = []
         self.merge_manual()
+        hid = self.load_hidden()
+        if hid:
+            self.items = [i for i in self.items if i.get('id') not in hid]
         self.render()
+
+    # ---------- 已删除（隐藏） ----------
+    def load_hidden(self):
+        try:
+            d = json.load(open(HIDDEN, encoding='utf-8'))
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def save_hidden(self, d):
+        try:
+            tmp = HIDDEN + '.tmp'
+            json.dump(d, open(tmp, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+            os.replace(tmp, HIDDEN)
+        except Exception:
+            pass
+
+    def delete_item(self, it):
+        """通用删除：自建待办真删；微信群交办记进 已删除.json，重抓也不再冒出"""
+        if self.is_manual(it):
+            self.delete_todo(it)
+            return
+        from tkinter import messagebox
+        was = bool(self.root.attributes('-topmost'))
+        self.root.attributes('-topmost', False)
+        try:
+            ok = messagebox.askyesno('删除这条交办',
+                                     '从清单里删掉这条？\n（微信里的消息不动，以后重抓也不会再出现）\n\n'
+                                     + it.get('text', '')[:60])
+        finally:
+            self.root.attributes('-topmost', was)
+        if not ok: return
+        h = self.load_hidden()
+        h[it['id']] = {'text': it.get('text', '')[:80],
+                       'at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
+        self.save_hidden(h)
+        try:
+            if os.path.exists(DONE):
+                st = json.load(open(DONE, encoding='utf-8'))
+                if st.pop(it['id'], None) is not None:
+                    json.dump(st, open(DONE, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+        self.expanded.discard(it['id'])
+        self.reload()
+        self.lb_foot.configure(text=f'已删除 1 条 · 已删除共 {len(h)} 条（⚙ 菜单可恢复）')
+
+    def restore_hidden(self):
+        h = self.load_hidden()
+        if not h: return
+        from tkinter import messagebox
+        was = bool(self.root.attributes('-topmost'))
+        self.root.attributes('-topmost', False)
+        try:
+            ok = messagebox.askyesno('恢复已删除', f'把 {len(h)} 条已删除的交办全部恢复？')
+        finally:
+            self.root.attributes('-topmost', was)
+        if not ok: return
+        try:
+            os.remove(HIDDEN)
+        except Exception:
+            self.save_hidden({})
+        self.reload()
+        self.lb_foot.configure(text='已恢复全部删除项')
 
     # ---------- 自建待办 ----------
     @staticmethod
@@ -763,16 +838,32 @@ class Widget:
 
     def do_refresh(self):
         if self.fetching: return
-        self.fetching = True; self.btn_refresh.configure(fg=AMBER)
+        self.fetching = True
+        self.btn_refresh.configure(fg=AMBER)
+        self.lb_foot.configure(text='正在重新抓取微信群消息…（十几秒到一分钟）')
+        if not os.path.exists(ENGINE):
+            self.fetching = False
+            self.btn_refresh.configure(fg=SUB)
+            self.reload()
+            self.lb_foot.configure(text='没找到 台账引擎.py，只重读了本地数据')
+            return
+        t0 = datetime.datetime.now()
 
         def work():
-            try: subprocess.run([PY, ENGINE, '--fetch'], capture_output=True, timeout=900)
+            kw = dict(capture_output=True, timeout=900)
+            if NO_WIN: kw['creationflags'] = NO_WIN        # 不弹黑色命令框
+            try: subprocess.run([PYW, ENGINE, '--fetch'], **kw)
             except Exception: pass
-            self.root.after(0, self.after_fetch)
+            try: self.root.after(0, lambda: self.after_fetch(t0))
+            except Exception: pass
         threading.Thread(target=work, daemon=True).start()
 
-    def after_fetch(self):
-        self.fetching = False; self.btn_refresh.configure(fg=SUB); self.reload()
+    def after_fetch(self, t0=None):
+        self.fetching = False
+        self.btn_refresh.configure(fg=SUB)
+        self.reload()
+        secs = int((datetime.datetime.now() - t0).total_seconds()) if t0 else 0
+        self.lb_foot.configure(text=f'已刷新 · 用时 {secs} 秒 · 共 {len(self.items)} 条')
 
     @staticmethod
     def is_today(it):
@@ -1095,7 +1186,7 @@ class Widget:
         ops.append((('修改备注' if note else '写备注'), lambda i=it: self.edit_note(it), BLUE))
         if self.is_manual(it):
             ops.append(('编辑', lambda i=it: self.todo_dialog(i), BLUE))
-            ops.append(('删除', lambda i=it: self.delete_todo(i), RED))
+        ops.append(('删除', lambda i=it: self.delete_item(i), RED))
         x = left
         for txt, cmd, fg in ops:
             w = self._chip(x, yy, txt, fg=fg, bg=CARD2, padx=10, h=26, cmd=cmd,
@@ -1210,9 +1301,10 @@ class Widget:
         m.add_command(label='复制原文', command=lambda: self.copy_text(it))
         m.add_command(label='写/改完成备注', command=lambda: self.edit_note(it))
         if self.is_manual(it):
-            m.add_separator()
             m.add_command(label='编辑这条待办…', command=lambda: self.todo_dialog(it))
-            m.add_command(label='删除这条待办', command=lambda: self.delete_todo(it))
+        m.add_separator()
+        m.add_command(label=('删除这条待办' if self.is_manual(it) else '删除这条交办'),
+                      command=lambda: self.delete_item(it))
         try: m.tk_popup(e.x_root, e.y_root)
         finally: m.grab_release()
 
