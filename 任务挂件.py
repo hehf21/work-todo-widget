@@ -22,16 +22,25 @@ MANUAL_GROUP = '手动添加'
 ORDER = {'overdue': 0, 'today': 1, 'new': 2, 'open': 3, 'done': 4}
 
 # ---------------- 设计 token ----------------
-DEFAULT_BG = '#10151C'
-BG, CARD, CARD2, HOVER, LINE = DEFAULT_BG, '#161D26', '#1C2531', '#202935', '#252E3B'
-TXT, SUB, MUT = '#E6EDF3', '#93A1B1', '#66737F'
-BLUE, RED, AMBER, GREEN = '#4C8DFF', '#FF5F56', '#F5A524', '#3FB950'
-W, H, PAD = 460, 660, 16
+DEFAULT_BG = '#0F141B'
+BG = DEFAULT_BG
+CARD, CARD2, CARD_HOVER, HOVER, LINE = '#171E26', '#1E2732', '#1A222B', '#26313D', '#2A3541'
+TXT, SUB, MUT = '#E8EEF6', '#93A1B2', '#66737F'
+BLUE, RED, AMBER, GREEN = '#4C8DFF', '#FF6B66', '#F5A524', '#3FB950'
+W, H, PAD, GAP = 460, 664, 16, 8
 COL_W = 320                     # 收起状态（小条）宽度
 FONT = 'Microsoft YaHei UI'
 PRIO_COLOR = {'overdue': RED, 'today': AMBER, 'new': BLUE, 'open': MUT, 'done': GREEN}
-THEME_DELTA = ((6, 8, 10), (12, 16, 21), (16, 20, 25), (21, 25, 31))   # BG→CARD/CARD2/HOVER/LINE
-BG_PRESETS = [('深夜黑', '#10151C'), ('石墨灰', '#14181D'), ('藏青', '#0D1626'), ('墨绿', '#0A1A14')]
+THEME_DELTA = ((8, 10, 11), (15, 19, 23), (23, 29, 34), (27, 33, 38))   # BG→CARD/CARD2/HOVER/LINE
+HOVER_DELTA = (11, 14, 16)      # BG→CARD_HOVER
+BG_PRESETS = [('深夜黑', '#0F141B'), ('石墨灰', '#14181D'), ('藏青', '#0D1626'), ('墨绿', '#0A1A14')]
+
+
+def rr_pts(x0, y0, x1, y1, r):
+    """圆角矩形控制点（配合 create_polygon(smooth=True) 画圆角）"""
+    return [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r,
+            x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
+            x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
 
 
 def _hex2rgb(s):
@@ -43,13 +52,15 @@ def _hex2rgb(s):
 
 def apply_theme(bg_hex):
     """背景色一改，卡片/悬停/分割线按固定色阶一起推导，保证对比度"""
-    global BG, CARD, CARD2, HOVER, LINE
+    global BG, CARD, CARD2, CARD_HOVER, HOVER, LINE
     try: r, g, b = _hex2rgb(bg_hex)
     except Exception: r, g, b = _hex2rgb(DEFAULT_BG)
+
+    def mix(d):
+        return '#%02X%02X%02X' % (min(r + d[0], 255), min(g + d[1], 255), min(b + d[2], 255))
     BG = '#%02X%02X%02X' % (r, g, b)
-    CARD, CARD2, HOVER, LINE = [
-        '#%02X%02X%02X' % (min(r + d[0], 255), min(g + d[1], 255), min(b + d[2], 255))
-        for d in THEME_DELTA]
+    CARD, CARD2, HOVER, LINE = [mix(d) for d in THEME_DELTA]
+    CARD_HOVER = mix(HOVER_DELTA)
     return BG
 
 
@@ -146,6 +157,7 @@ class Widget:
         self.reminded = {k for k, v in saved.items() if v == today}
         self.fetching, self.last_gen = False, ''
         self.banner_on = False
+        self._seq, self._imgrefs, self._cw = 0, [], 0
         self.bg = apply_theme(self.cfg.get('bg', DEFAULT_BG))
         try: self.alpha = min(max(float(self.cfg.get('alpha', 1.0)), 0.35), 1.0)
         except Exception: self.alpha = 1.0
@@ -179,81 +191,160 @@ class Widget:
     # ---------- 骨架 ----------
     def build(self):
         r = self.root
-        self.head = tk.Frame(r, bg=BG); self.head.pack(fill='x', padx=PAD, pady=(12, 0))
+        # 标题栏
+        self.head = tk.Frame(r, bg=BG); self.head.pack(fill='x', padx=PAD, pady=(14, 0))
         left = tk.Frame(self.head, bg=BG); left.pack(side='left')
-        tk.Label(left, text='工作交办', font=self.f_title, fg=TXT, bg=BG).pack(anchor='w')
+        self.lb_title = tk.Label(left, text='工作交办', font=self.f_title, fg=TXT, bg=BG)
+        self.lb_title.pack(anchor='w')
         self.lb_date = tk.Label(left, text='', font=self.f_small, fg=MUT, bg=BG)
-        self.lb_date.pack(anchor='w')
-        right = tk.Frame(self.head, bg=BG); right.pack(side='right')
-        self.btn_add = self.icon_btn(right, '＋新增', self.todo_dialog, BLUE)
-        self.btn_refresh = self.icon_btn(right, '⟳', self.do_refresh, AMBER)
-        self.btn_menu = self.icon_btn(right, '⚙', self.menu)
-        self.icon_btn(right, '－', self.collapse)
-        self.icon_btn(right, '✕', self.quit)
-        for w in (self.head, left, right, self.lb_date):
+        self.lb_date.pack(anchor='w', pady=(3, 0))
+
+        right = tk.Frame(self.head, bg=BG); right.pack(side='right', pady=(1, 0))
+        self.btn_close = self.hdr_icon(right, '✕', self.quit)
+        self.btn_min = self.hdr_icon(right, '－', self.collapse)
+        self.btn_menu = self.hdr_icon(right, '⚙', self.menu)
+        self.btn_refresh = self.hdr_icon(right, '⟳', self.do_refresh, AMBER)
+        self.add_cv = tk.Canvas(right, width=104, height=28, bg=BG, highlightthickness=0, bd=0,
+                                cursor='hand2')
+        self.add_cv.pack(side='right', padx=(2, 10))
+        self.add_cv.bind('<Button-1>', lambda e: self.todo_dialog())
+        self.draw_add_btn()
+
+        for w in (self.head, left, right, self.lb_title, self.lb_date):
             w.bind('<Button-1>', self.drag_start)
             w.bind('<B1-Motion>', self.drag_move)
             w.bind('<ButtonRelease-1>', self.head_click)
 
-        self.stats = tk.Frame(r, bg=BG); self.stats.pack(fill='x', padx=PAD, pady=(10, 0))
-        self.p_over = self.pill('逾期', RED, 'overdue')
-        self.p_today = self.pill('今日', AMBER, 'today')
-        self.p_open = self.pill('待办', BLUE, 'open')
-        self.p_done = self.pill('完成', GREEN, 'all')
+        # 分段筛选条（待办 / 今日 / 逾期 / 完成）
+        self.stats = tk.Canvas(r, height=34, bg=BG, highlightthickness=0, bd=0)
+        self.stats.pack(fill='x', padx=PAD, pady=(10, 0))
+        self.stats.bind('<Button-1>', self.seg_click)
+        self._seg_rects = []
 
-        self.banner = tk.Frame(r, bg='#3A1D1D')
-        self.banner_lb = tk.Label(self.banner, text='', font=self.f_small, fg='#FFB4AE', bg='#3A1D1D',
-                                  anchor='w', justify='left', wraplength=W - 70)
-        self.banner_lb.pack(side='left', padx=(10, 0), pady=7)
-        bx = tk.Label(self.banner, text='✕', font=self.f_small, fg='#FFB4AE', bg='#3A1D1D', cursor='hand2')
-        bx.pack(side='right', padx=9)
-        bx.bind('<Button-1>', lambda e: self.hide_banner())
+        # 顶部提示条
+        self.banner = tk.Canvas(r, height=34, bg=BG, highlightthickness=0, bd=0)
+        self.banner.bind('<Button-1>', self.banner_click)
 
-        self.wrap = tk.Frame(r, bg=BG); self.wrap.pack(fill='both', expand=True, padx=(PAD, 8), pady=(10, 0))
-        self.canvas = tk.Canvas(self.wrap, bg=BG, highlightthickness=0, bd=0)
+        # 列表
+        self.wrap = tk.Frame(r, bg=BG); self.wrap.pack(fill='both', expand=True, padx=(PAD, 10), pady=(10, 0))
+        self.canvas = tk.Canvas(self.wrap, bg=BG, highlightthickness=0, bd=0, cursor='hand2')
         self.canvas.pack(side='left', fill='both', expand=True)
-        self.sb = tk.Scrollbar(self.wrap, orient='vertical', command=self.canvas.yview, width=8, bd=0,
-                               bg=BG, troughcolor=BG, activebackground='#2C3746', highlightthickness=0, relief='flat')
+        self.sb = tk.Canvas(self.wrap, width=8, bg=BG, highlightthickness=0, bd=0)
+        self.sb.bind('<Configure>', lambda e: self.draw_sb())
+        self.sb.bind('<Button-1>', self.sb_jump)
+        self.sb.bind('<B1-Motion>', self.sb_jump)
         self.canvas.configure(yscrollcommand=self.on_scroll)
-        self.body = tk.Frame(self.canvas, bg=BG)
-        self.win = self.canvas.create_window((0, 0), window=self.body, anchor='nw')
-        self.body.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure(self.win, width=e.width))
         self.canvas.bind_all('<MouseWheel>', self.on_wheel)
+        self.canvas.bind('<Configure>', self.on_canvas_resize)
         r.bind_all('<Control-n>', lambda e: self.todo_dialog())
 
-        self.foot = tk.Frame(r, bg=BG); self.foot.pack(fill='x', padx=PAD, pady=(8, 10))
+        # 底栏
+        self.foot = tk.Frame(r, bg=BG); self.foot.pack(fill='x', padx=PAD, pady=(10, 12))
         self.lb_foot = tk.Label(self.foot, text='', font=self.f_small, fg=MUT, bg=BG)
         self.lb_foot.pack(side='left')
-        self.btn_filter = tk.Label(self.foot, text='显示全部', font=self.f_small, fg=BLUE, bg=BG, cursor='hand2')
+        self.btn_filter = tk.Label(self.foot, text='显示全部', font=self.f_small, fg=SUB, bg=BG,
+                                   cursor='hand2', padx=6, pady=2)
         self.btn_filter.pack(side='right')
         self.btn_filter.bind('<Button-1>', lambda e: self.toggle_filter())
+        self.btn_filter.bind('<Enter>', lambda e: self.btn_filter.configure(fg=BLUE))
+        self.btn_filter.bind('<Leave>', lambda e: self.btn_filter.configure(fg=SUB))
 
-    def icon_btn(self, parent, ch, cmd, hover_color=TXT):
-        b = tk.Label(parent, text=ch, font=(FONT, 11), fg=SUB, bg=BG, cursor='hand2', padx=6)
-        b.pack(side='left')
+    def hdr_icon(self, parent, ch, cmd, hover_color=TXT):
+        b = tk.Label(parent, text=ch, font=(FONT, 10), fg=SUB, bg=BG, cursor='hand2',
+                     padx=6, pady=3)
+        b.pack(side='right')
         b.bind('<Button-1>', lambda e: cmd())
-        b.bind('<Enter>', lambda e: b.configure(fg=hover_color))
-        b.bind('<Leave>', lambda e: b.configure(fg=SUB))
+        b.bind('<Enter>', lambda e, w=b, c=hover_color:
+               w.configure(fg=c, bg=CARD))
+        b.bind('<Leave>', lambda e, w=b: w.configure(fg=SUB, bg=BG))
         return b
 
-    def pill(self, label, color, key):
-        f = tk.Frame(self.stats, bg=CARD2, cursor='hand2'); f.pack(side='left', padx=(0, 7))
-        dot = tk.Canvas(f, width=6, height=6, bg=CARD2, highlightthickness=0)
-        dot.create_oval(0, 0, 6, 6, fill=color, outline='')
-        dot.pack(side='left', padx=(9, 4), pady=8)
-        lb = tk.Label(f, text=label, font=self.f_small, fg=SUB, bg=CARD2)
-        lb.pack(side='left', padx=(0, 9))
-        f._lb, f._dot = lb, dot
-        for w in (f, lb, dot):
-            w.bind('<Button-1>', lambda e, k=key: self.set_filter(k))
-            w.bind('<Enter>', lambda e, ff=f: self.pill_hover(ff, True))
-            w.bind('<Leave>', lambda e, ff=f: self.pill_hover(ff, False))
-        return f
+    def draw_add_btn(self, compact=False):
+        cv = self.add_cv
+        cv.delete('all')
+        w, h = (34, 28) if compact else (98, 28)
+        cv.configure(width=w, height=h)
+        rid = cv.create_polygon(rr_pts(1, 1, w - 1, h - 1, 14 if compact else 9),
+                                smooth=True, fill=BLUE, outline='')
+        txt = '＋' if compact else '＋ 新增'
+        cv.create_text(w / 2, h / 2, text=txt, font=(FONT, 10),
+                       fill='#FFFFFF')
+        cv.bind('<Enter>', lambda e: cv.itemconfigure(rid, fill='#629BFF'))
+        cv.bind('<Leave>', lambda e: cv.itemconfigure(rid, fill=BLUE))
 
-    def pill_hover(self, f, on):
-        c = HOVER if on else CARD2
-        f.configure(bg=c); f._lb.configure(bg=c); f._dot.configure(bg=c)
+    def mk_chip(self, parent, text, cmd, fg='#FFFFFF', bg=None, h=28, padx=14, font=None,
+                hover=None, r=8):
+        """给普通 Frame 弹窗用的圆角按钮（Canvas 实现）"""
+        font = font or self.f_small
+        bg = BLUE if bg is None else bg
+        hov = hover or ('#629BFF' if bg == BLUE else HOVER)
+        w = font.measure(text) + padx * 2
+        cv = tk.Canvas(parent, width=w, height=h, bg=parent.cget('bg'),
+                       highlightthickness=0, bd=0, cursor='hand2')
+        rid = cv.create_polygon(rr_pts(0.5, 0.5, w - 0.5, h - 0.5, r), smooth=True,
+                                fill=bg, outline='')
+        cv.create_text(w / 2, h / 2, text=text, fill=fg, font=font)
+        cv.bind('<Button-1>', lambda e: cmd())
+        cv.bind('<Enter>', lambda e: cv.itemconfigure(rid, fill=hov))
+        cv.bind('<Leave>', lambda e: cv.itemconfigure(rid, fill=bg))
+        return cv
+
+    # ---------- 分段筛选 ----------
+    SEGS = [('open', '待办', BLUE), ('today', '今日', AMBER),
+            ('overdue', '逾期', RED), ('done', '完成', GREEN)]
+
+    def draw_segments(self, c):
+        cv = self.stats
+        cv.delete('all')
+        w = cv.winfo_width()
+        if w < 80: w = W - 2 * PAD
+        h = 34
+        cv.create_polygon(rr_pts(0, 2, w, h - 2, 10), smooth=True, fill=CARD, outline='')
+        vals = {'open': len(self.items) - c['done'], 'today': c['today'],
+                'overdue': c['overdue'], 'done': c['done']}
+        seg_w = w / len(self.SEGS)
+        self._seg_rects = []
+        for i, (key, label, color) in enumerate(self.SEGS):
+            x0 = i * seg_w
+            active = (self.filter == key)
+            if active:
+                cv.create_polygon(rr_pts(x0 + 3, 5, x0 + seg_w - 3, h - 5, 8), smooth=True,
+                                  fill=HOVER, outline='#3A4756')
+            txt = f'{label} {vals.get(key, 0)}'
+            tw = self.f_small.measure(txt)
+            gx = x0 + seg_w / 2 - (tw + 12) / 2
+            cv.create_oval(gx, h / 2 - 3, gx + 6, h / 2 + 3, fill=color, outline='')
+            cv.create_text(gx + 12, h / 2, text=txt, font=self.f_small, anchor='w',
+                           fill=(TXT if active else SUB))
+            self._seg_rects.append((x0, x0 + seg_w, key))
+
+    def seg_click(self, e):
+        for x0, x1, key in getattr(self, '_seg_rects', []):
+            if x0 <= e.x < x1:
+                self.set_filter(key)
+                return
+
+    # ---------- 顶部提示条 ----------
+    def draw_banner(self, text):
+        cv = self.banner
+        cv.delete('all')
+        w = cv.winfo_width()
+        if w < 80: w = W - 2 * PAD
+        h = 34
+        cv.create_polygon(rr_pts(0, 2, w, h - 2, 10), smooth=True, fill='#2B1D1E',
+                          outline='#55302F')
+        cv.create_text(12, h / 2, text=text, font=self.f_small, fill='#FFB7B2', anchor='w',
+                       width=w - 44)
+        cv.create_text(w - 13, h / 2, text='✕', font=self.f_small, fill='#B98D8A', anchor='e',
+                       tags=('bannerx',))
+
+    def banner_click(self, e):
+        w = self.banner.winfo_width() or W - 2 * PAD
+        if e.x > w - 30:
+            self.hide_banner()
+
+    def hide_banner(self):
+        self.banner.pack_forget(); self.banner_on = False
 
     # ---------- 交互 ----------
     def drag_start(self, e):
@@ -274,9 +365,42 @@ class Widget:
         except Exception: pass
 
     def on_scroll(self, first, last):
-        self.sb.set(first, last)
-        if float(first) <= 0 and float(last) >= 1: self.sb.pack_forget()
-        else: self.sb.pack(side='right', fill='y')
+        first, last = float(first), float(last)
+        self._yview = (first, last)
+        if first <= 0 and last >= 1:
+            if self.sb.winfo_ismapped():
+                self.sb.pack_forget()
+            return
+        if not self.sb.winfo_ismapped():
+            self.sb.pack(side='right', fill='y', padx=(2, 0))
+        self.draw_sb()
+
+    def draw_sb(self):
+        """自绘细滑条：6px 圆角，跟着滚动位置走"""
+        cv = self.sb
+        cv.delete('all')
+        h = cv.winfo_height()
+        if h < 24: return
+        first, last = getattr(self, '_yview', (0.0, 1.0))
+        top, bot = first * h + 4, last * h - 4
+        if bot - top < 26:
+            mid = (top + bot) / 2
+            top, bot = mid - 13, mid + 13
+        top, bot = max(top, 3), min(bot, h - 3)
+        cv.create_polygon(rr_pts(2, top, 6, bot, 2), smooth=True, fill='#313D4B', outline='')
+
+    def sb_jump(self, e):
+        h = self.sb.winfo_height() or 1
+        first, last = getattr(self, '_yview', (0.0, 1.0))
+        span = last - first
+        frac = max(0.0, min(e.y / h - span / 2, 1 - span))
+        self.canvas.yview_moveto(frac)
+
+    def on_canvas_resize(self, e):
+        if abs(e.width - getattr(self, '_cw', 0)) < 3:
+            return
+        self._cw = e.width
+        self.render()
 
     def hide_banner(self):
         self.banner.pack_forget(); self.banner_on = False
@@ -289,16 +413,16 @@ class Widget:
         if self._col:
             for f in (self.stats, self.wrap, self.foot): f.pack_forget()
             if self.banner_on: self.banner.pack_forget()
-            try: self.btn_add.configure(text='＋', padx=3)
+            try: self.draw_add_btn(compact=True)
             except Exception: pass
             self.root.geometry(f'{COL_W}x80')
         else:
-            try: self.btn_add.configure(text='＋新增', padx=6)
+            try: self.draw_add_btn(compact=False)
             except Exception: pass
             self.stats.pack(fill='x', padx=PAD, pady=(10, 0))
             if self.banner_on: self.banner.pack(fill='x', padx=PAD, pady=(8, 0))
-            self.wrap.pack(fill='both', expand=True, padx=(PAD, 8), pady=(10, 0))
-            self.foot.pack(fill='x', padx=PAD, pady=(8, 10))
+            self.wrap.pack(fill='both', expand=True, padx=(PAD, 10), pady=(10, 0))
+            self.foot.pack(fill='x', padx=PAD, pady=(10, 12))
             self.root.geometry(f'{W}x{H}')
         self.render()
 
@@ -355,18 +479,18 @@ class Widget:
         top = tk.Toplevel(self.root)
         top.overrideredirect(True)
         top.attributes('-topmost', True)
-        top.configure(bg='#161D26')
-        w, h = 396, 322
+        top.configure(bg=CARD)
+        w, h = 396, 300
         x = max(self.root.winfo_x() - w - 24, 16)
         y = max(min(self.root.winfo_y() + 40, self.root.winfo_screenheight() - h - 40), 16)
         top.geometry(f'{w}x{h}+{x}+{y}')
-        FG, SUB2, SF, HOV = '#E6EDF3', '#93A1B1', '#161D26', '#202935'
+        FG, SUB2, SF, HOV = TXT, SUB, CARD, HOVER
         tk.Label(top, text='外观设置', font=self.f_title, fg=FG, bg=SF).pack(anchor='w', padx=14, pady=(12, 1))
         tk.Label(top, text='改完立即生效，保存在 挂件配置.json', font=self.f_small,
-                 fg='#66737F', bg=SF).pack(anchor='w', padx=14)
+                 fg=MUT, bg=SF).pack(anchor='w', padx=14)
 
         tk.Label(top, text='背景色（卡片、分割线自动跟着调）', font=self.f_small,
-                 fg=SUB2, bg=SF).pack(anchor='w', padx=14, pady=(10, 4))
+                 fg=SUB2, bg=SF).pack(anchor='w', padx=14, pady=(12, 5))
         prow = tk.Frame(top, bg=SF); prow.pack(fill='x', padx=14)
         e_var = tk.StringVar(value=self.bg)
 
@@ -378,30 +502,26 @@ class Widget:
             self.save_cfg()
 
         for name, hexv in BG_PRESETS:
-            sw = tk.Frame(prow, bg='#1C2531', highlightthickness=1, highlightbackground='#2A3542',
+            sw = tk.Frame(prow, bg=CARD2, highlightthickness=1, highlightbackground=LINE,
                           cursor='hand2')
             sw.pack(side='left', padx=(0, 6))
-            chip = tk.Canvas(sw, width=12, height=12, bg='#1C2531', highlightthickness=0, bd=0)
-            chip.create_rectangle(0, 0, 12, 12, fill=hexv, outline='')
-            chip.pack(side='left', padx=(7, 5), pady=7)
-            lb = tk.Label(sw, text=name, font=self.f_small, fg='#E6EDF3', bg='#1C2531',
-                          cursor='hand2')
+            chip = tk.Canvas(sw, width=12, height=12, bg=CARD2, highlightthickness=0, bd=0)
+            chip.create_polygon(rr_pts(0, 0, 12, 12, 3), smooth=True, fill=hexv, outline=LINE)
+            chip.pack(side='left', padx=(8, 5), pady=7)
+            lb = tk.Label(sw, text=name, font=self.f_small, fg=TXT, bg=CARD2, cursor='hand2')
             lb.pack(side='left', padx=(0, 9), pady=5)
             for c in (sw, lb, chip):
                 c.bind('<Button-1>', lambda e, v=hexv: use(v))
 
-        erow = tk.Frame(top, bg=SF); erow.pack(fill='x', padx=14, pady=(8, 0))
+        erow = tk.Frame(top, bg=SF); erow.pack(fill='x', padx=14, pady=(9, 0))
         tk.Label(erow, text='自定义', font=self.f_small, fg=SUB2, bg=SF).pack(side='left')
         tk.Entry(erow, textvariable=e_var, width=10, bg=HOV, fg=FG, insertbackground=FG, bd=0,
                  font=self.f_small, highlightthickness=1,
-                 highlightbackground='#2A3542').pack(side='left', padx=(6, 6), ipady=3)
-        ap = tk.Label(erow, text='应用', font=self.f_small, bg=BLUE, fg='white', cursor='hand2',
-                      padx=10, pady=3)
-        ap.pack(side='left')
-        ap.bind('<Button-1>', lambda e: use(e_var.get()))
+                 highlightbackground=LINE).pack(side='left', padx=(6, 6), ipady=3)
+        self.mk_chip(erow, '应用', lambda: use(e_var.get()), h=26, padx=12).pack(side='left')
 
         tk.Label(top, text='透明度（往左拖透出桌面，文字会一起变淡）', font=self.f_small,
-                 fg=SUB2, bg=SF).pack(anchor='w', padx=14, pady=(14, 0))
+                 fg=SUB2, bg=SF).pack(anchor='w', padx=14, pady=(16, 0))
         arow = tk.Frame(top, bg=SF); arow.pack(fill='x', padx=14)
         a_lb = tk.Label(arow, text=f'{int(self.alpha * 100)}%', font=self.f_small, fg=FG, bg=SF,
                         width=5, anchor='e')
@@ -414,12 +534,27 @@ class Widget:
             except Exception: pass
             a_lb.configure(text=f'{int(a * 100)}%')
 
-        sc = tk.Scale(arow, from_=35, to=100, orient='horizontal', showvalue=0, command=on_alpha,
-                      bg='#41506A', fg=SUB2, troughcolor='#0E1420', highlightthickness=0, bd=0,
-                      sliderrelief='flat', relief='flat', activebackground=BLUE,
-                      length=232, width=9, sliderlength=16)
-        sc.set(int(self.alpha * 100))
-        sc.pack(side='left', pady=(2, 0))
+        s_cv = tk.Canvas(arow, width=232, height=22, bg=SF, highlightthickness=0, bd=0,
+                         cursor='hand2')
+        s_cv.pack(side='left', pady=(1, 0))
+
+        def draw_slider():
+            s_cv.delete('all')
+            x0, x1, cy = 6, 226, 11
+            s_cv.create_line(x0, cy, x1, cy, fill='#2C3947', width=4, capstyle='round')
+            frac = (self.alpha * 100 - 35) / 65
+            kx = x0 + (x1 - x0) * max(0.0, min(frac, 1.0))
+            s_cv.create_line(x0, cy, kx, cy, fill=BLUE, width=4, capstyle='round')
+            s_cv.create_oval(kx - 6, cy - 6, kx + 6, cy + 6, fill='#FFFFFF', outline='')
+
+        def set_from_x(x):
+            frac = min(max((x - 6) / 220.0, 0.0), 1.0)
+            on_alpha(35 + frac * 65)
+            draw_slider()
+
+        s_cv.bind('<Button-1>', lambda e: set_from_x(e.x))
+        s_cv.bind('<B1-Motion>', lambda e: set_from_x(e.x))
+        draw_slider()
 
         bar = tk.Frame(top, bg=SF); bar.pack(fill='x', padx=14, pady=(16, 12), side='bottom')
 
@@ -429,19 +564,15 @@ class Widget:
             self.save_cfg()
             top.destroy()
 
-        ok = tk.Label(bar, text='保存并关闭', font=self.f_small, bg=BLUE, fg='white',
-                      cursor='hand2', padx=12, pady=5)
-        ok.pack(side='right')
-        ok.bind('<Button-1>', lambda e: close())
-        rs = tk.Label(bar, text='恢复默认', font=self.f_small, bg='#1C2531', fg=SUB2,
-                      cursor='hand2', padx=10, pady=5)
-        rs.pack(side='right', padx=(0, 8))
+        self.mk_chip(bar, '保存并关闭', close, h=30, padx=16).pack(side='right')
 
         def reset(_=None):
             use(DEFAULT_BG)
-            sc.set(100)
-        rs.bind('<Button-1>', reset)
-        tk.Label(bar, text='收起时是小条，尺寸沿用上次', font=self.f_small, fg='#66737F',
+            on_alpha(100)
+            draw_slider()
+
+        self.mk_chip(bar, '恢复默认', reset, fg=SUB, bg=CARD2, h=30, padx=14).pack(side='right', padx=(0, 8))
+        tk.Label(bar, text='收起时是小条，尺寸沿用上次', font=self.f_small, fg=MUT,
                  bg=SF).pack(side='left')
         top.bind('<Escape>', lambda e: close())
 
@@ -543,15 +674,11 @@ class Widget:
                        highlightbackground=LINE, highlightcolor=BLUE)
         ent.pack(fill='x', padx=14, ipady=6)
 
-        quick = tk.Frame(top, bg=CARD); quick.pack(fill='x', padx=14, pady=(5, 0))
+        quick = tk.Frame(top, bg=CARD); quick.pack(fill='x', padx=14, pady=(6, 0))
         for lb, val in [('今天17:00', '今天17:00'), ('明天17:00', '明天17:00'),
                         ('本周五下班前', '本周五下班前'), ('清空', '')]:
-            b = tk.Label(quick, text=lb, font=self.f_small, bg=CARD2, fg=BLUE,
-                         cursor='hand2', padx=8, pady=2)
-            b.pack(side='left', padx=(0, 6))
-            b.bind('<Button-1>', lambda e, v=val: dl_var.set(v))
-            b.bind('<Enter>', lambda e, wb=b: wb.configure(bg=HOVER))
-            b.bind('<Leave>', lambda e, wb=b: wb.configure(bg=CARD2))
+            self.mk_chip(quick, lb, lambda v=val: dl_var.set(v), fg=BLUE, bg=CARD2,
+                         h=24, padx=9).pack(side='left', padx=(0, 6))
 
         row = tk.Frame(top, bg=CARD); row.pack(fill='x', padx=14, pady=(9, 0))
         tk.Label(row, text='交办人/来源', font=self.f_small, fg=MUT, bg=CARD).pack(side='left')
@@ -577,14 +704,9 @@ class Widget:
             self.save_todo(it if editing else None, text, dl, who_var.get().strip())
             top.destroy()
 
-        b1 = tk.Label(bar, text=('保存' if editing else '添加待办'), font=self.f_small, bg=BLUE,
-                      fg='white', cursor='hand2', padx=14, pady=5)
-        b1.pack(side='right')
-        b1.bind('<Button-1>', save)
-        b2 = tk.Label(bar, text='取消', font=self.f_small, bg=CARD2, fg=SUB, cursor='hand2',
-                      padx=12, pady=5)
-        b2.pack(side='right', padx=(0, 8))
-        b2.bind('<Button-1>', lambda e: top.destroy())
+        self.mk_chip(bar, ('保存' if editing else '添加待办'), save, h=30, padx=18).pack(side='right')
+        self.mk_chip(bar, '取消', top.destroy, fg=SUB, bg=CARD2, h=30, padx=14).pack(
+            side='right', padx=(0, 8))
         tk.Label(bar, text='Ctrl+Enter 保存　Esc 取消', font=self.f_small, fg=MUT,
                  bg=CARD).pack(side='left')
         top.bind('<Escape>', lambda e: top.destroy())
@@ -667,225 +789,273 @@ class Widget:
         return c
 
     # ---------- 渲染 ----------
+    def visible_items(self):
+        f = self.filter
+        if f == 'all': return list(self.items)
+        if f == 'done': return [i for i in self.items if i['done']]
+        if f == 'today': return [i for i in self.items if self.is_today(i)]
+        if f == 'overdue': return [i for i in self.items if i['prio'] == 'overdue']
+        return [i for i in self.items if not i['done']]
+
     def render(self):
-        for w in self.body.winfo_children(): w.destroy()
         c = self.counts()
-        _opens = len(self.items) - c['done']
+        opens = len(self.items) - c['done']
         if getattr(self, '_col', False):
-            _bits = [f'待办 {_opens}']
-            if c['overdue']: _bits.append(f'逾期 {c["overdue"]}')
-            if c['today']: _bits.append(f'今日 {c["today"]}')
-            self.lb_date.configure(text='·'.join(_bits), fg=RED if c['overdue'] else (AMBER if c['today'] else SUB))
+            bits = [f'待办 {opens}']
+            if c['overdue']: bits.append(f'逾期 {c["overdue"]}')
+            if c['today']: bits.append(f'今日 {c["today"]}')
+            self.lb_date.configure(text=' · '.join(bits),
+                                   fg=RED if c['overdue'] else (AMBER if c['today'] else SUB))
         else:
-            self.lb_date.configure(text=datetime.date.today().strftime('%Y年%m月%d日') + (f' · 更新 {self.last_gen[11:16]}' if self.last_gen else ' · 未取数'), fg=MUT)
-        self.p_over._lb.configure(text=f'逾期 {c["overdue"]}')
-        self.p_today._lb.configure(text=f'今日 {c["today"]}')
-        self.p_open._lb.configure(text=f'待办 {len(self.items) - c["done"]}')
-        self.p_done._lb.configure(text=f'完成 {c["done"]}')
+            gen = f' · 更新 {self.last_gen[11:16]}' if self.last_gen else ' · 未取数'
+            self.lb_date.configure(text=datetime.date.today().strftime('%Y年%m月%d日') + gen, fg=MUT)
+
+        self.draw_segments(c)
         self.btn_filter.configure(text='只看待办' if self.filter == 'all' else '显示全部')
 
-        if self.filter == 'all': show = self.items
-        elif self.filter == 'open': show = [i for i in self.items if not i['done']]
-        elif self.filter == 'today': show = [i for i in self.items if self.is_today(i)]
-        elif self.filter == 'overdue': show = [i for i in self.items if i['prio'] == 'overdue']
-        else: show = [i for i in self.items if not i['done']]
-
+        cv = self.canvas
+        cv.delete('all')
+        self._imgrefs = []
+        cw = cv.winfo_width()
+        if cw < 120: cw = W - PAD - 10 - 6
+        y = 6
+        show = self.visible_items()
         if not show:
-            tk.Label(self.body, text='这里空着，挺好 ☕', font=self.f_body, fg=MUT, bg=BG).pack(pady=36)
-        for it in show: self.card(it)
-        self.body.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
-        self.lb_foot.configure(text=f'共 {len(self.items)} 条 · 未完成 {len(self.items) - c["done"]}')
+            y = self.draw_empty(y, cw)
+        for it in show:
+            y = self.draw_card(it, y, cw)
+        cv.configure(scrollregion=(0, 0, cw, y + 6))
+        self.lb_foot.configure(text=f'共 {len(self.items)} 条 · 未完成 {opens}')
 
-        def _fresh(i):
-            if i['done']: return False
-            if i['prio'] == 'today': return True
-            if i['prio'] == 'overdue':
-                d = parse_dt(i['deadline'])
-                return bool(d) and (datetime.datetime.now() - d).days <= 3
-            return False
-        hot = [i for i in self.items if _fresh(i)]
-        if hot and self.filter != 'done':
-            names = '、'.join((i['text'][:14] + '…') if len(i['text']) > 14 else i['text'] for i in hot[:2])
-            self.banner_lb.configure(text=f'⚠  {len(hot)} 件要处理：{names}')
-            if not self.banner_on and not getattr(self, '_col', False):
+        hot = [i for i in self.items if not i['done'] and i['prio'] in ('overdue', 'today')]
+        if hot and not getattr(self, '_col', False):
+            head = hot[0]['text'].replace('\n', ' ')
+            head = head[:16] + ('…' if len(head) > 16 else '')
+            self.draw_banner(f'⚠ {len(hot)} 件要处理 · {head}')
+            if not self.banner_on:
                 self.banner.pack(fill='x', padx=PAD, pady=(8, 0), after=self.stats)
                 self.banner_on = True
         elif self.banner_on:
             self.hide_banner()
 
-    def card(self, it):
-        color = PRIO_COLOR[it['prio']]
-        row = tk.Frame(self.body, bg=CARD); row.pack(fill='x', pady=(0, 6))
-        bar = tk.Frame(row, bg=color, width=4); bar.pack(side='left', fill='y')
-        right = tk.Frame(row, bg=CARD); right.pack(side='left', fill='both', expand=True,
-                                                   padx=(11, 10), pady=9)
+    # ---------- 画布元素 ----------
+    def _next_tag(self, prefix):
+        self._seq += 1
+        return f'{prefix}{self._seq}'
 
-        expanded = it['id'] in self.expanded
-        # 顶部一行：标题 + 完成按钮
-        head = tk.Frame(right, bg=CARD); head.pack(fill='x')
-        if it['done']:
-            mark = tk.Label(head, text='✓ 已完成', font=self.f_small, bg=CARD, fg=GREEN,
-                            cursor='hand2', padx=6, pady=1)
-        else:
-            mark = tk.Label(head, text='完成', font=self.f_small, bg=CARD2, fg=SUB,
-                            cursor='hand2', padx=9, pady=3)
-        mark.pack(side='right', padx=(6, 0))
-        mark.bind('<Button-1>', lambda e, i=it: self.toggle_done(i))
-        mark.bind('<Enter>', lambda e, m=mark, i=it: m.configure(bg=HOVER, fg=MUT if i['done'] else GREEN))
-        mark.bind('<Leave>', lambda e, m=mark, i=it: m.configure(bg=CARD if i['done'] else CARD2,
-                                                                 fg=GREEN if i['done'] else SUB))
+    def _text(self, x, y, text, font=None, fill=None, width=None, anchor='nw', tags=()):
+        font = font or self.f_body
+        i = self.canvas.create_text(x, y, text=text, font=font, fill=fill or TXT,
+                                    width=width, anchor=anchor, justify='left', tags=tags)
+        return i, self.canvas.bbox(i)
 
-        # 标题：折叠时截断，展开时全文
-        tag = None
-        if self.is_manual(it):
-            tag = tk.Label(head, text='自建', font=self.f_small, bg=CARD2, fg=BLUE, padx=5, pady=1)
-            tag.pack(side='left', padx=(0, 6))
-        title = it['text']
-        if not expanded and len(title) > 46:
-            title = title[:46] + '…'
-        lb_t = tk.Label(head, text=title, font=self.f_body, bg=CARD,
-                        fg=MUT if it['done'] else TXT, anchor='w', justify='left',
-                        wraplength=W - 150 if not expanded else W - 110)
-        lb_t.pack(side='left', fill='x', expand=True)
+    def _chip(self, x, y, text, font=None, fg=SUB, bg=None, padx=10, h=24, r=8,
+              cmd=None, hbg=None, hfg=None):
+        font = font or self.f_small
+        bg = CARD2 if bg is None else bg
+        w = font.measure(text) + padx * 2
+        tg = self._next_tag('chip')
+        rid = self.canvas.create_polygon(rr_pts(x, y, x + w, y + h, r), smooth=True,
+                                         fill=bg, outline='', tags=(tg,))
+        tid = self.canvas.create_text(x + w / 2, y + h / 2, text=text, fill=fg, font=font,
+                                      tags=(tg,))
+        if cmd is not None:
+            self.canvas.tag_bind(tg, '<Button-1>', lambda e, c=cmd: c())
+            self.canvas.tag_bind(tg, '<Enter>', lambda e, rid=rid, tid=tid:
+                                 (self.canvas.itemconfigure(rid, fill=hbg or HOVER),
+                                  self.canvas.itemconfigure(tid, fill=hfg or TXT)))
+            self.canvas.tag_bind(tg, '<Leave>', lambda e, rid=rid, tid=tid:
+                                 (self.canvas.itemconfigure(rid, fill=bg),
+                                  self.canvas.itemconfigure(tid, fill=fg)))
+        return w
 
-        # 第二行：发布时间 · 交办人 · 群 · 到期
+    def _block(self, y, cw, head, text, fg=SUB, ctag=''):
+        pad, inner = 14, 10
+        x = pad + inner
+        wid = max(cw - 2 * x, 80)
+        _, hb = self._text(x, y + inner - 2, head, self.f_small, MUT, width=wid, tags=(ctag,))
+        _, tb = self._text(x, hb[3] + 3, text, self.f_small, fg, width=wid, tags=(ctag,))
+        bot = tb[3] + inner
+        rid = self.canvas.create_polygon(rr_pts(pad, y, cw - pad, bot, 10), smooth=True,
+                                         fill=CARD2, outline='', tags=(ctag,))
+        self.canvas.tag_lower(rid)
+        return bot
+
+    def draw_empty(self, y, cw):
+        self.canvas.create_text(cw / 2, y + 44, text='这一栏是空的', font=self.f_body, fill=SUB)
+        self.canvas.create_text(cw / 2, y + 68, text='点右上角「＋ 新增」，或按 Ctrl+N',
+                                font=self.f_small, fill=MUT)
+        txt = '＋ 新增待办'
+        w = self.f_small.measure(txt) + 28
+        self._chip((cw - w) / 2, y + 88, txt, fg='#FFFFFF', bg=BLUE, padx=14, h=28,
+                   cmd=self.todo_dialog, hbg='#629BFF', hfg='#FFFFFF')
+        return y + 128
+
+    # ---------- 卡片 ----------
+    def _meta_color(self, it):
+        if it['done']: return GREEN
+        if it['prio'] == 'overdue': return RED
+        if it['prio'] == 'today': return AMBER
+        return SUB
+
+    def _meta(self, it, tail, expanded):
+        pub = it['time'][5:16] if len(it['time']) >= 16 else it['time']
         grp = (it['group'].replace('运管投诉件处理', '投诉件')
                          .replace('（港航中心航运处）水运管理群', '水运管理群')
-                         .replace('港航地海防汛防台风', '防汛防台风')
+                         .replace('港海地海防汛防台风', '防汛防台风')
                          .replace('平潭综合实验区船东协会', '船东协会')
                          .replace('全区客渡船停复航群', '客渡船停复航'))
         if len(grp) > 9: grp = grp[:9] + '…'
-        pub = it['time'][5:16] if len(it['time']) >= 16 else it['time']
+        parts = ['已办结'] if it['done'] else []
+        if not expanded:                      # 展开时详情里已经有这些，标题区只留截止
+            parts.append(f'{pub} · {it["from"]}')
+            if not self.is_manual(it):
+                parts.append(grp)
+            if it.get('note'):
+                parts.append('有备注')
+        if tail:
+            parts.append(tail)
+        return ' · '.join(parts)
+
+    def draw_card(self, it, y, cw):
+        cv = self.canvas
+        ctag = 'c' + str(it['id'])
+        expanded = it['id'] in self.expanded
         tail = rel_deadline(it['deadline'])
-        meta = f'{pub} · {it["from"]}'
-        if not expanded and not self.is_manual(it): meta += f'｜{grp}'
-        if tail: meta += f'｜{tail}'
-        if it.get('img') and os.path.exists(it['img']): meta += '｜含图'
-        if (it.get('note') or '').strip(): meta += '｜有备注'
-        if it['done']: meta = '已完成 · ' + meta
-        lb_m = tk.Label(right, text=meta, font=self.f_small, bg=CARD, anchor='w',
-                        justify='left', wraplength=W - 80,
-                        fg=GREEN if it['done'] else (RED if it['prio'] == 'overdue' else
-                                                     AMBER if it['prio'] == 'today' else SUB))
-        lb_m.pack(anchor='w', pady=(3, 0))
+        pad, left = 14, 28
 
-        # 展开：完整原文 + 全部字段
+        # 右上角：完成 / 已完成
+        done = it['done']
+        dtxt = '✓ 已完成' if done else '完成'
+        dw = self.f_small.measure(dtxt) + 18
+        dx = cw - pad - dw
+        self._chip(dx, y + 12, dtxt, fg=(GREEN if done else SUB),
+                   bg=('#15251B' if done else CARD2), padx=9, h=24,
+                   cmd=lambda i=it: self.toggle_done(i),
+                   hbg=('#1B3325' if done else HOVER), hfg=GREEN)
+        hx = dx - 6
+        if self.is_manual(it):
+            w2 = self.f_small.measure('自建') + 14
+            hx -= w2
+            self._chip(hx, y + 12, '自建', fg=BLUE, bg='#18263B', padx=7, h=24)
+            hx -= 6
+
+        # 状态点 + 标题
+        cv.create_oval(left - 13, y + 16, left - 6, y + 23,
+                       fill=PRIO_COLOR[it['prio']], outline='', tags=(ctag,))
+        twrap = max(hx - left - 6, 120)
+        title = it['text'].replace('\n', ' ')
+        if not expanded and len(title) > 54:
+            title = title[:54] + '…'
+        _, tb = self._text(left, y + 12, title, self.f_body, MUT if done else TXT,
+                           width=twrap, tags=(ctag,))
+
+        # 元信息
+        meta = self._meta(it, tail, expanded) or '\u00a0'
+        _, mb = self._text(left, tb[3] + 5, meta, self.f_small,
+                           self._meta_color(it), width=max(cw - left - pad, 140), tags=(ctag,))
+        bottom = mb[3] + 12
         if expanded:
-            det = tk.Frame(right, bg=CARD); det.pack(fill='x', pady=(7, 0))
-            hr = tk.Frame(det, bg=LINE, height=1); hr.pack(fill='x', pady=(0, 7))
-            tk.Label(det, text=it['text'], font=self.f_body, fg=TXT, bg=CARD, anchor='w',
-                     justify='left', wraplength=W - 60).pack(anchor='w')
-            lines = ([f'建立：{it["time"]}　来源：{it["from"]}'] if self.is_manual(it) else
-                     [f'群：{it["group"]}', f'发布：{it["time"]}　交办人：{it["from"]}'])
-            if it['deadline']: lines.append(f'截止：{it["deadline"]}（{tail}）')
-            if it['done_at']: lines.append(f'完成于：{it["done_at"]}')
-            for ln in lines:
-                tk.Label(det, text=ln, font=self.f_small, fg=MUT, bg=CARD, anchor='w',
-                         justify='left', wraplength=W - 60).pack(anchor='w', pady=(3, 0))
-            if it['rtext']:
-                tk.Label(det, text=f'我的回应（{it["replied"]}）：{it["rtext"]}', font=self.f_small,
-                         fg=BLUE, bg=CARD, anchor='w', justify='left',
-                         wraplength=W - 60).pack(anchor='w', pady=(5, 0))
-            ctx = it.get('ctx') or []
-            if ctx:
-                tk.Label(det, text='上文（群里之前说了什么）', font=self.f_small, fg=MUT,
-                         bg=CARD, anchor='w').pack(anchor='w', pady=(8, 2))
-                for c in ctx[-5:]:
-                    tk.Label(det, text=f"{c['time'][5:16]} {c['from']}：{c['text'][:90]}",
-                             font=self.f_small, fg=SUB, bg=CARD, anchor='w', justify='left',
-                             wraplength=W - 60).pack(anchor='w', pady=(1, 0))
+            bottom = self._draw_detail(it, mb[3] + 10, cw, ctag, tail)
 
-            img = it.get('img') or ''
-            if img and os.path.exists(img):
-                tk.Label(det, text='相关图片（点图看大图）', font=self.f_small, fg=MUT,
-                         bg=CARD, anchor='w').pack(anchor='w', pady=(8, 3))
-                try:
-                    from PIL import Image, ImageStat, ImageTk
-                    im0 = Image.open(img)
-                    stat = ImageStat.Stat(im0.convert('L'))
-                    if stat.stddev[0] < 2:      # 纯色 = 微信只留了空白占位
-                        tk.Label(det, text='⚠ 本机这张只是空白占位图（原图已过期，需在微信里点开原图重新下载）',
-                                 font=self.f_small, fg=AMBER, bg=CARD, anchor='w', justify='left',
-                                 wraplength=W - 60).pack(anchor='w')
-                    else:
-                        im0.thumbnail((300, 240))
-                        thumb = ImageTk.PhotoImage(im0)
-                        lb_img = tk.Label(det, image=thumb, bg=CARD2, cursor='hand2', bd=0)
-                        lb_img.image = thumb
-                        lb_img.pack(anchor='w')
-                        lb_img.bind('<Button-1>', lambda e, p=img: self.show_image(p))
-                except Exception as e:
-                    tk.Label(det, text=f'缩略图失败：{e}', font=self.f_small, fg=MUT,
-                             bg=CARD, anchor='w').pack(anchor='w')
-                rowimg = tk.Frame(det, bg=CARD); rowimg.pack(fill='x', pady=(6, 0))
-                for txt, cmd in [('看大图', lambda p=img: self.show_image(p)),
-                                 ('用外部程序打开', lambda p=img: os.startfile(p))]:
-                    b = tk.Label(rowimg, text=txt, font=self.f_small, bg=CARD2, fg=BLUE,
-                                 cursor='hand2', padx=9, pady=3)
-                    b.pack(side='left', padx=(0, 8))
-                    b.bind('<Button-1>', lambda e, c=cmd: c())
-                    b.bind('<Enter>', lambda e, w=b: w.configure(bg=HOVER))
-                    b.bind('<Leave>', lambda e, w=b: w.configure(bg=CARD2))
+        bgid = cv.create_polygon(rr_pts(0, y, cw, bottom, 12), smooth=True,
+                                 fill=CARD, outline='', tags=(ctag,))
+        cv.tag_lower(bgid)
+        cv.tag_bind(ctag, '<Enter>', lambda e, b=bgid: cv.itemconfigure(b, fill=CARD_HOVER))
+        cv.tag_bind(ctag, '<Leave>', lambda e, b=bgid: cv.itemconfigure(b, fill=CARD))
+        cv.tag_bind(ctag, '<Button-1>', lambda e, i=it: self.toggle_detail(i))
+        cv.tag_bind(ctag, '<Button-3>', lambda e, i=it: self.card_menu(e, i))
+        return bottom + GAP
 
-            note = (it.get('note') or '').strip()
-            tk.Label(det, text='完成情况备注', font=self.f_small, fg=MUT,
-                     bg=CARD, anchor='w').pack(anchor='w', pady=(8, 2))
-            if note:
-                nb = tk.Frame(det, bg=CARD2); nb.pack(fill='x', pady=(0, 2))
-                tk.Label(nb, text=note, font=self.f_small, fg=SUB, bg=CARD2, anchor='w',
-                         justify='left', wraplength=W - 70).pack(padx=9, pady=6, anchor='w')
-            nbtn = tk.Label(det, text=('修改备注' if note else '写备注（怎么完成的、结果如何）'),
-                            font=self.f_small, bg=CARD2, fg=BLUE, cursor='hand2', padx=9, pady=4)
-            nbtn.pack(anchor='w', pady=(3, 0))
-            nbtn.bind('<Button-1>', lambda e, i=it: self.edit_note(i))
-            nbtn.bind('<Enter>', lambda e, w=nbtn: w.configure(bg=HOVER))
-            nbtn.bind('<Leave>', lambda e, w=nbtn: w.configure(bg=CARD2))
+    def _draw_detail(self, it, y, cw, ctag, tail):
+        cv = self.canvas
+        pad, left = 14, 28
+        inner = cw - pad
+        cv.create_line(left, y, inner - 6, y, fill=LINE, tags=(ctag,))
+        yy = y + 12
 
-            att = it.get('att') or ''
-            if att and os.path.exists(att):
-                tk.Label(det, text='相关文件', font=self.f_small, fg=MUT,
-                         bg=CARD, anchor='w').pack(anchor='w', pady=(8, 3))
-                fr = tk.Frame(det, bg=CARD); fr.pack(fill='x')
-                b = tk.Label(fr, text='📄 ' + (it.get('att_name') or os.path.basename(att))[:44],
-                             font=self.f_small, bg=CARD2, fg=BLUE, cursor='hand2',
-                             padx=9, pady=5, anchor='w', justify='left')
-                b.pack(side='left', fill='x')
-                b.bind('<Button-1>', lambda e, p=att: os.startfile(p))
-                b.bind('<Enter>', lambda e, w=b: w.configure(bg=HOVER))
-                b.bind('<Leave>', lambda e, w=b: w.configure(bg=CARD2))
-                tk.Label(det, text='（点文件名直接用本机程序打开，Excel/Word/PDF 都行）',
-                         font=self.f_small, fg=MUT, bg=CARD, anchor='w').pack(anchor='w', pady=(2, 0))
+        _, b = self._text(left, yy, it['text'], self.f_body, TXT, width=inner - left, tags=(ctag,))
+        yy = b[3] + 10
 
-            ops = tk.Frame(det, bg=CARD); ops.pack(fill='x', pady=(7, 0))
-            op_list = [(('撤销完成' if it['done'] else '标记完成'), lambda i=it: self.toggle_done(i)),
-                       ('复制原文', lambda i=it: self.copy_text(i))]
-            if self.is_manual(it):
-                op_list += [('编辑这条', lambda i=it: self.todo_dialog(i)),
-                            ('删除这条', lambda i=it: self.delete_todo(i))]
-            for txt, cmd in op_list:
-                b = tk.Label(ops, text=txt, font=self.f_small, bg=CARD2, fg=SUB,
-                             cursor='hand2', padx=9, pady=3)
-                b.pack(side='left', padx=(0, 8))
-                b.bind('<Button-1>', lambda e, c=cmd: c())
-                b.bind('<Enter>', lambda e, w=b: w.configure(bg=HOVER, fg=TXT))
-                b.bind('<Leave>', lambda e, w=b: w.configure(bg=CARD2, fg=SUB))
+        src = (f'来源 {it["from"]} · 建立 {it["time"]}' if self.is_manual(it)
+               else f'群 {it["group"]} · 交办 {it["from"]}')
+        _, b = self._text(left, yy, src, self.f_small, MUT, width=inner - left, tags=(ctag,))
+        yy = b[3] + 2
+        if not self.is_manual(it):
+            _, b = self._text(left, yy, f'发布 {it["time"]}', self.f_small, MUT,
+                              width=inner - left, tags=(ctag,))
+            yy = b[3] + 2
+        if it['deadline']:
+            _, b = self._text(left, yy, f'截止 {it["deadline"]}' + (f' · {tail}' if tail else ''),
+                              self.f_small, self._meta_color(it), width=inner - left, tags=(ctag,))
+            yy = b[3] + 2
+        if it['done_at']:
+            _, b = self._text(left, yy, f'完成于 {it["done_at"]}', self.f_small, MUT,
+                              width=inner - left, tags=(ctag,))
+            yy = b[3] + 2
+        yy += 8
 
-        for w in [row, right, head, lb_t, lb_m, bar] + ([tag] if tag is not None else []):
-            w.bind('<Button-1>', lambda e, i=it: self.toggle_detail(i))
-            w.bind('<Button-3>', lambda e, i=it: self.card_menu(e, i))
-            w.bind('<Double-Button-1>', lambda e, i=it: self.copy_text(i))
-            w.bind('<Enter>', lambda e, r=row: self.hl(r, True))
-            w.bind('<Leave>', lambda e, r=row: self.hl(r, False))
+        if it.get('rtext'):
+            yy = self._block(yy, cw, '我的回应 · ' + (it['replied'] or ''), it['rtext'],
+                             BLUE, ctag) + 8
+        note = (it.get('note') or '').strip()
+        if note:
+            yy = self._block(yy, cw, '完成备注', note, SUB, ctag) + 8
 
-    def hl(self, row, on):
-        bg = HOVER if on else CARD
-        stack = [row]
-        while stack:
-            w = stack.pop()
-            try: w.configure(bg=bg)
-            except Exception: pass
-            stack.extend(w.winfo_children())
+        img = it.get('img') or ''
+        if img and os.path.exists(img):
+            yy = self._draw_img(it, img, yy, cw, ctag) + 8
+
+        att = it.get('att') or ''
+        if att and os.path.exists(att):
+            name = (it.get('att_name') or os.path.basename(att))
+            name = name[:38] + ('…' if len(name) > 38 else '')
+            self._chip(left, yy, '📄 ' + name, fg=BLUE, bg=CARD2, padx=10, h=26,
+                       cmd=lambda p=att: os.startfile(p), hbg=HOVER, hfg=TXT)
+            yy += 26 + 8
+
+        ops = [(('撤销完成' if it['done'] else '标记完成'),
+                lambda i=it: self.toggle_done(i), (SUB if it['done'] else GREEN))]
+        ops.append(('复制原文', lambda i=it: self.copy_text(it), SUB))
+        ops.append((('修改备注' if note else '写备注'), lambda i=it: self.edit_note(it), BLUE))
+        if self.is_manual(it):
+            ops.append(('编辑', lambda i=it: self.todo_dialog(i), BLUE))
+            ops.append(('删除', lambda i=it: self.delete_todo(i), RED))
+        x = left
+        for txt, cmd, fg in ops:
+            w = self._chip(x, yy, txt, fg=fg, bg=CARD2, padx=10, h=26, cmd=cmd,
+                           hbg=HOVER, hfg=TXT)
+            x += w + 6
+        return yy + 26 + 12
+
+    def _draw_img(self, it, path, y, cw, ctag):
+        cv = self.canvas
+        left, pad = 28, 14
+        ytag = self._next_tag('img')
+        try:
+            from PIL import Image, ImageStat, ImageTk
+            im0 = Image.open(path)
+            if ImageStat.Stat(im0.convert('L')).stddev[0] < 2:
+                _, b = self._text(left, y, '⚠ 这张本机只是空白占位图，原图需在微信里重新下载',
+                                  self.f_small, AMBER, width=cw - left - pad, tags=(ctag,))
+                return b[3] + 4
+            im0.thumbnail((280, 190))
+            ph = ImageTk.PhotoImage(im0)
+            self._imgrefs.append(ph)
+            cv.create_image(left, y, image=ph, anchor='nw', tags=(ctag, ytag))
+            cv.tag_bind(ytag, '<Button-1>', lambda e, p=path: self.show_image(p))
+            yy = y + im0.size[1] + 8
+        except Exception as e:
+            _, b = self._text(left, y, f'缩略图打不开：{e}', self.f_small, MUT,
+                              width=cw - left - pad, tags=(ctag,))
+            return b[3] + 4
+        x = left
+        for txt, cmd in [('看大图', lambda p=path: self.show_image(p)),
+                         ('外部打开', lambda p=path: os.startfile(p))]:
+            w = self._chip(x, yy, txt, fg=BLUE, bg=CARD2, padx=10, h=24, cmd=cmd,
+                           hbg=HOVER, hfg=TXT)
+            x += w + 6
+        return yy + 24 + 2
 
     def edit_note(self, it):
         top = tk.Toplevel(self.root)
@@ -907,13 +1077,9 @@ class Widget:
             val = txt.get('1.0', 'end').strip()
             self.save_note(it, val)
             top.destroy()
-        b1 = tk.Label(bar, text='保存备注', font=self.f_small, bg=BLUE, fg='white', cursor='hand2',
-                      padx=12, pady=5)
-        b1.pack(side='right')
-        b1.bind('<Button-1>', save)
-        b2 = tk.Label(bar, text='取消', font=self.f_small, bg=CARD2, fg=SUB, cursor='hand2', padx=12, pady=5)
-        b2.pack(side='right', padx=(0, 8))
-        b2.bind('<Button-1>', lambda e: top.destroy())
+        self.mk_chip(bar, '保存备注', save, h=30, padx=16).pack(side='right')
+        self.mk_chip(bar, '取消', top.destroy, fg=SUB, bg=CARD2, h=30, padx=14).pack(
+            side='right', padx=(0, 8))
         top.bind('<Escape>', lambda e: top.destroy())
         txt.bind('<Control-Return>', save)
 
