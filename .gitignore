@@ -1,0 +1,10 @@
+# 程序产物
+__pycache__/
+*.py[cod]
+*.log
+
+# 本地数据，永远不要提交
+台账.json
+完成状态.json
+手工待办.json
+挂件配置.json
