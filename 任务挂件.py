@@ -158,6 +158,7 @@ class Widget:
         self.fetching, self.last_gen = False, ''
         self.banner_on = False
         self._seq, self._imgrefs, self._cw = 0, [], 0
+        self.closed_days, self._grp_init = set(), False
         self.bg = apply_theme(self.cfg.get('bg', DEFAULT_BG))
         try: self.alpha = min(max(float(self.cfg.get('alpha', 1.0)), 0.35), 1.0)
         except Exception: self.alpha = 1.0
@@ -822,8 +823,11 @@ class Widget:
         show = self.visible_items()
         if not show:
             y = self.draw_empty(y, cw)
-        for it in show:
-            y = self.draw_card(it, y, cw)
+        elif self.filter == 'done':
+            y = self.draw_done_groups(show, y, cw)
+        else:
+            for it in show:
+                y = self.draw_card(it, y, cw)
         cv.configure(scrollregion=(0, 0, cw, y + 6))
         self.lb_foot.configure(text=f'共 {len(self.items)} 条 · 未完成 {opens}')
 
@@ -891,22 +895,93 @@ class Widget:
                    cmd=self.todo_dialog, hbg='#629BFF', hfg='#FFFFFF')
         return y + 128
 
+    # ---------- 已完成按日期折叠 ----------
+    def done_day_keys(self, items):
+        out = {}
+        for it in items:
+            d = (it.get('done_at') or '')[:10] or (it.get('time') or '')[:10] or '0000-00-00'
+            out.setdefault(d, []).append(it)
+        return out
+
+    def day_label(self, key):
+        try:
+            d = datetime.date.fromisoformat(key)
+        except Exception:
+            return '完成时间未记录'
+        today = datetime.date.today()
+        wd = '一二三四五六日'[d.weekday()]
+        s = f'{d.month}月{d.day}日 周{wd}'
+        if d.year != today.year:
+            s = f'{d.year}年' + s
+        if d == today:
+            return '今天 · ' + s
+        if (today - d).days == 1:
+            return '昨天 · ' + s
+        return s
+
+    def toggle_day(self, key):
+        if key in self.closed_days:
+            self.closed_days.discard(key)
+        else:
+            self.closed_days.add(key)
+        self.render()
+
+    def draw_done_groups(self, items, y, cw):
+        groups = self.done_day_keys(items)
+        keys = sorted(groups.keys(), reverse=True)
+        if not getattr(self, '_grp_init', False) and keys:
+            self.closed_days = set(keys[1:])      # 默认只展开最近一天
+            self._grp_init = True
+        for i, k in enumerate(keys):
+            grp = groups[k]
+            open_ = k not in self.closed_days
+            if i:
+                y += 4
+            y = self.draw_group_header(i, k, len(grp), y, cw, open_)
+            if open_:
+                for it in grp:
+                    y = self.draw_card(it, y, cw)
+        return y
+
+    def draw_group_header(self, idx, key, n, y, cw, open_):
+        cv = self.canvas
+        hh = 34
+        mid = y + hh / 2
+        chev = cv.create_text(3, mid, text=('▾' if open_ else '▸'), font=self.f_small,
+                              fill=(SUB if open_ else MUT), anchor='w')
+        lab = cv.create_text(20, mid, text=self.day_label(key), font=self.f_small,
+                             fill=(TXT if open_ else SUB), anchor='w')
+        cnt = cv.create_text(cw - 2, mid, text=f'{n} 条', font=self.f_small, fill=MUT, anchor='e')
+        ln = cv.create_line(0, y + hh - 1, cw, y + hh - 1, fill=LINE)
+
+        def click(_e=None, k=key):
+            self.toggle_day(k)
+        for i in (chev, lab, cnt, ln):
+            cv.tag_bind(i, '<Button-1>', click)
+        cv.tag_bind(lab, '<Enter>', lambda e, i=lab: cv.itemconfigure(i, fill=BLUE))
+        cv.tag_bind(lab, '<Leave>', lambda e, i=lab:
+                    cv.itemconfigure(i, fill=(TXT if open_ else SUB)))
+        return y + hh + (2 if open_ else 4)
+
     # ---------- 卡片 ----------
     def _meta_color(self, it):
-        if it['done']: return GREEN
+        if it['done']: return SUB
         if it['prio'] == 'overdue': return RED
         if it['prio'] == 'today': return AMBER
         return SUB
 
     def _meta(self, it, tail, expanded):
+        in_done_view = (self.filter == 'done')
         pub = it['time'][5:16] if len(it['time']) >= 16 else it['time']
+        if in_done_view and (it.get('done_at') or '').strip():
+            pub = '完成于 ' + it['done_at'][5:16]
         grp = (it['group'].replace('运管投诉件处理', '投诉件')
                          .replace('（港航中心航运处）水运管理群', '水运管理群')
                          .replace('港海地海防汛防台风', '防汛防台风')
                          .replace('平潭综合实验区船东协会', '船东协会')
                          .replace('全区客渡船停复航群', '客渡船停复航'))
         if len(grp) > 9: grp = grp[:9] + '…'
-        parts = ['已办结'] if it['done'] else []
+        parts = ['已办结'] if (it['done'] and not in_done_view) else []
         if not expanded:                      # 展开时详情里已经有这些，标题区只留截止
             parts.append(f'{pub} · {it["from"]}')
             if not self.is_manual(it):
